@@ -35,6 +35,8 @@ HELP = """[bold]t[/] — fast on-device terminal translator (Hunyuan-MT / MLX)
 [bold]Translate[/]
   t <text>              translate into your default language
   t <lang> <text>       translate into <lang>  (e.g. t ja hello world)
+  t                     paste mode: clears screen, paste/type, [bold]Ctrl+D[/] to translate
+  t <lang>              paste mode targeting <lang>  (e.g. t ja)
   pbpaste | t           translate clipboard / piped text
   pbpaste | t zh        translate piped text into Chinese
 
@@ -59,6 +61,96 @@ def _read_stdin() -> str | None:
         return None
     data = sys.stdin.read()
     return data if data.strip() else None
+
+
+# clear screen + scrollback + move cursor home
+_CLEAR = "\x1b[2J\x1b[3J\x1b[H"
+
+
+def _interactive_input(target) -> str | None:
+    """Clear the screen and let the user paste / type multi-line text.
+
+    Finish with Ctrl+D to translate; Ctrl+C cancels. Returns the text, or None
+    if cancelled. Falls back to a plain cooked read if raw mode is unavailable.
+    """
+    w = sys.stderr  # draw the UI on stderr so stdout stays clean for piping
+    w.write(_CLEAR)
+    w.flush()
+    err.print(
+        f"[bold cyan]t[/]  粘贴或输入内容，完成后按 [bold]Ctrl+D[/] 翻译"
+        f"  ·  [dim]Ctrl+C 取消[/]  →  目标 [bold]{target.zh_name}[/] [dim]({target.en_name})[/]"
+    )
+    err.print("[dim]" + "─" * 60 + "[/]")
+    try:
+        text = _raw_read(sys.stdin.fileno(), w)
+    except KeyboardInterrupt:
+        err.print("\n[dim]已取消[/]")
+        return None
+    except Exception:  # noqa: BLE001 - termios.error etc.: fall back to cooked read
+        try:
+            text = sys.stdin.read()   # not a real tty: cooked fallback (Ctrl+D)
+        except KeyboardInterrupt:
+            return None
+    err.print("[dim]" + "─" * 60 + "[/]")
+    return text
+
+
+def _raw_read(fd: int, w) -> str:
+    """Read multi-line input in raw mode; Ctrl+D submits, Ctrl+C raises."""
+    import codecs
+    import os
+    import termios
+    import tty
+
+    old = termios.tcgetattr(fd)
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    buf: list[str] = []
+    esc = 0  # 0: none, 1: saw ESC, 2: inside an escape sequence
+
+    w.write("\x1b[?2004l")  # disable bracketed paste so its markers don't leak in
+    w.flush()
+    try:
+        # TCSANOW: switch to raw immediately without flushing input already typed
+        # or pasted before we got here (TCSAFLUSH, the default, would drop it).
+        tty.setraw(fd, termios.TCSANOW)
+        done = False
+        while not done:
+            data = os.read(fd, 4096)
+            if not data:
+                break  # EOF
+            for ch in decoder.decode(data):
+                if esc == 1:
+                    esc = 2 if ch in "[O" else 0
+                    continue
+                if esc == 2:
+                    if ch.isalpha() or ch == "~":
+                        esc = 0
+                    continue
+                if ch == "\x04":            # Ctrl+D -> submit
+                    done = True
+                    break
+                if ch == "\x03":            # Ctrl+C -> cancel
+                    raise KeyboardInterrupt
+                if ch == "\x1b":            # arrow keys etc. — consume & ignore
+                    esc = 1
+                    continue
+                if ch in ("\r", "\n"):
+                    buf.append("\n")
+                    w.write("\r\n"); w.flush()
+                    continue
+                if ch in ("\x7f", "\b"):    # backspace (within the current line)
+                    if buf and buf[-1] != "\n":
+                        buf.pop()
+                        w.write("\b \b"); w.flush()
+                    continue
+                if ord(ch) < 0x20 and ch != "\t":
+                    continue                # ignore other control chars
+                buf.append(ch)
+                w.write(ch); w.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        w.write("\r\n"); w.flush()
+    return "".join(buf)
 
 
 def _print_help() -> None:
@@ -239,11 +331,20 @@ def main() -> None:
         if target is None:
             target = default
     else:
-        if not args:
+        # `t` (or `t <lang>`) with nothing else on a terminal opens paste mode.
+        interactive = sys.stdin.isatty() and (
+            not args or (len(args) == 1 and resolve(args[0]) is not None)
+        )
+        if interactive:
+            target = resolve(args[0]) if args else default
+            content = _interactive_input(target)
+            if content is None:        # cancelled
+                sys.exit(0)
+        elif not args:
             _print_help(); sys.exit(0)
         # `t <lang> <text...>`: first token is a target only if it resolves AND
         # there is something after it. Otherwise the whole thing is content.
-        if len(args) >= 2 and resolve(args[0]) is not None:
+        elif len(args) >= 2 and resolve(args[0]) is not None:
             target = resolve(args[0])
             content = " ".join(args[1:])
         else:

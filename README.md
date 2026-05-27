@@ -70,6 +70,16 @@ pbpaste | t zh
 t es hello world | pbcopy
 ```
 
+### Paste mode (multi-line) — just run `t`
+
+Run `t` with no text to open **paste mode**: the screen clears and you can paste
+or type as many lines as you like. Press **Ctrl+D** to translate, **Ctrl+C** to cancel.
+
+```bash
+t            # paste/type, then Ctrl+D → translate into your default language
+t ja         # same, but target Japanese
+```
+
 ### Set your default language
 
 ```bash
