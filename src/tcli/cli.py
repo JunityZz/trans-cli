@@ -3,8 +3,10 @@
 Usage:
     t <text>                 translate <text> into your default language
     t <lang> <text>          translate <text> into <lang>
-    pbpaste | t              translate piped text into your default language
-    pbpaste | t <lang>       translate piped text into <lang>
+    t --pb                   translate the clipboard into your default language
+    t <lang> --pb            translate the clipboard into <lang>
+    … | t [lang]             translate piped text (e.g. cat file | t)
+    t [lang] -- <text>       everything after `--` is literal text, even a dash
 
 Management:
     t --set-lang <lang>      set the default target language
@@ -35,10 +37,13 @@ HELP = """[bold]t[/] — fast on-device terminal translator (Hunyuan-MT / MLX)
 [bold]Translate[/]
   t <text>              translate into your default language
   t <lang> <text>       translate into <lang>  (e.g. t ja hello world)
+  t --pb                translate the clipboard  ([bold]t <lang> --pb[/] for a target)
   t                     paste mode: clears screen, paste/type, [bold]Ctrl+D[/] to translate
   t <lang>              paste mode targeting <lang>  (e.g. t ja)
-  pbpaste | t           translate clipboard / piped text
-  pbpaste | t zh        translate piped text into Chinese
+  … | t                 translate piped text  (e.g. cat notes.txt | t zh)
+
+  [dim]Quotes or symbols ([/]'[dim], [/]"[dim], [/]$[dim]) in the text confuse the shell, not[/] t[dim].
+  Don't fight it: copy the text and run[/] t --pb[dim], or run[/] t [dim]and paste.[/]
 
 [bold]Configure[/]
   t --set-lang <lang>   set default language   (e.g. t --set-lang zh)
@@ -61,6 +66,31 @@ def _read_stdin() -> str | None:
         return None
     data = sys.stdin.read()
     return data if data.strip() else None
+
+
+def _read_clipboard() -> str | None:
+    """Read the macOS clipboard via `pbpaste`. None on error (already reported)."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(["pbpaste"], capture_output=True, text=True)
+    except FileNotFoundError:
+        err.print("[red]--pb needs macOS [bold]pbpaste[/], which wasn't found.[/]")
+        return None
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"pbpaste exited with {proc.returncode}"
+        err.print(f"[red]Could not read clipboard:[/] {detail}")
+        return None
+    return proc.stdout
+
+
+def _target_from_args(args: list[str], default):
+    """Resolve a target language from args that name only a language.
+
+    Used when the content came from elsewhere (clipboard / pipe). Falls back to
+    the default if args are empty or don't name a known language.
+    """
+    return (resolve(" ".join(args)) if args else default) or default
 
 
 # clear screen + scrollback + move cursor home
@@ -291,7 +321,7 @@ def _translate(target, content: str) -> int:
 def main() -> None:
     args = sys.argv[1:]
 
-    # ---- management commands -------------------------------------------
+    # ---- management commands (recognized only as the first token) ------
     if args:
         a0 = args[0]
         if a0 in ("-h", "--help", "help"):
@@ -316,20 +346,39 @@ def main() -> None:
             sys.exit(_cmd_model(args[1] if len(args) > 1 else None))
         if a0 in ("--download", "download"):
             sys.exit(_cmd_download())
-        if a0 == "--":            # force everything after as text
-            args = args[1:]
+
+    # `--` ends flag parsing: everything after it is literal text to translate,
+    # so text that starts with a dash still works (e.g. t -- --pb, t zh -- --x).
+    forced_text = None
+    if "--" in args:
+        cut = args.index("--")
+        forced_text = " ".join(args[cut + 1:])
+        args = args[:cut]
+
+    # --pb pulls content from the clipboard; remaining args name the target.
+    use_clipboard = "--pb" in args
+    if use_clipboard:
+        args = [a for a in args if a != "--pb"]
 
     # ---- translation ----------------------------------------------------
     conf = cfg.load()
     default = resolve(conf["default_lang"]) or LANGUAGES["en"]
-    stdin_data = _read_stdin()
+    # Explicit text sources (after `--`, or --pb) mean we don't read stdin.
+    stdin_data = None if (use_clipboard or forced_text is not None) else _read_stdin()
 
-    if stdin_data is not None:
+    if forced_text is not None:
+        # Text after `--`; args before it (if any) name the target language.
+        content = forced_text
+        target = _target_from_args(args, default)
+    elif use_clipboard:
+        content = _read_clipboard()
+        if content is None:
+            sys.exit(1)            # error already reported
+        target = _target_from_args(args, default)
+    elif stdin_data is not None:
         # Piped input is the content; args (if any) name the target language.
         content = stdin_data
-        target = resolve(" ".join(args)) if args else default
-        if target is None:
-            target = default
+        target = _target_from_args(args, default)
     else:
         # `t` (or `t <lang>`) with nothing else on a terminal opens paste mode.
         interactive = sys.stdin.isatty() and (

@@ -25,7 +25,7 @@ English · [简体中文](README.zh-CN.md)
 - **Streaming output that doesn't scroll.** Tokens render in place so your eyes never chase a moving line.
 - **Warm daemon.** The model loads once and stays resident, so everyday translations feel instant.
 - **100% local & private.** Runs entirely on-device via MLX. Works offline.
-- **Pipe-friendly.** `pbpaste | t` or `t hello | pbcopy`.
+- **Clipboard-friendly.** `t --pb` translates whatever you've copied; `t hello | pbcopy` copies the result back.
 
 ## 📦 Install (one line)
 
@@ -62,9 +62,13 @@ t fr I would like a coffee
 t 中文 The weather is nice today
 t 普通话 The weather is nice today      # names the model understands work too
 
-# Pipe text in (great for the clipboard)
-pbpaste | t
-pbpaste | t zh
+# Translate the clipboard
+t --pb
+t zh --pb
+
+# Pipe text in
+cat notes.txt | t
+echo "Bonjour le monde" | t zh
 
 # Send the result somewhere
 t es hello world | pbcopy
@@ -79,6 +83,11 @@ or type as many lines as you like. Press **Ctrl+D** to translate, **Ctrl+C** to 
 t            # paste/type, then Ctrl+D → translate into your default language
 t ja         # same, but target Japanese
 ```
+
+> **Text with quotes or symbols?** A sentence like `t what's up?` breaks in your
+> shell (the `'` starts a quote) — *before* `t` even runs, so no flag can fix it.
+> Just bypass the shell: copy the text and run `t --pb`, or run `t` and paste.
+> To translate text that *starts with a dash*, use `--`: `t -- --pb`, `t zh -- -v`.
 
 ### Set your default language
 
