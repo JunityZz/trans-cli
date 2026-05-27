@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trans-cli-t"
+version = "0.1.0"
+description = "t — a blazing-fast terminal translator for macOS, powered by the on-device Hunyuan-MT (Hy-MT2) model via MLX."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "trans-cli contributors" }]
+keywords = ["translation", "cli", "mlx", "hunyuan", "macos", "llm", "on-device"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "mlx-lm>=0.21",
+    "rich>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JunityZz/trans-cli"
+Repository = "https://github.com/JunityZz/trans-cli"
+
+[project.scripts]
+t = "tcli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tcli"]
