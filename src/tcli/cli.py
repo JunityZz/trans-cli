@@ -15,7 +15,9 @@ Management:
     t --status               show the translator daemon status
     t --stop | --restart     control the daemon
     t --config               show config file and values
-    t --model <id>           set the MLX model id
+    t --model <id>           set the model id (local MLX repo, or remote model name)
+    t --base-url <url>       use a remote OpenAI-compatible API (none/empty = local MLX)
+    t --api-key <key>        API key for the remote endpoint
     t --help | --version
 """
 
@@ -49,13 +51,16 @@ HELP = """[bold]t[/] — fast on-device terminal translator (Hunyuan-MT / MLX)
   t --set-lang <lang>   set default language   (e.g. t --set-lang zh)
   t --lang              show current default
   t --langs             list supported languages
-  t --model <id>        set the MLX model id
+  t --model <id>        set the model id (local MLX repo, or remote model name)
+  t --base-url <url>    use a remote OpenAI-compatible API  ([bold]none[/] = local MLX)
+  t --api-key <key>     API key for the remote endpoint
   t --config            show config path and values
 
 [bold]Daemon[/]
   t --status            model / daemon status
   t --stop              stop the background model
   t --restart           restart it
+  t --serve [port]      OpenAI-compatible HTTP endpoint (reuses the daemon)
 
   t --help              this help        t --version
 """
@@ -236,6 +241,10 @@ def _cmd_status() -> int:
     state = info.get("status", "?")
     color = {"ready": "green", "loading": "yellow", "error": "red"}.get(state, "white")
     err.print(f"Translator daemon: [{color}]{state}[/]  pid={info.get('pid')}")
+    if info.get("backend") == "remote":
+        err.print(f"Backend: [bold]remote[/] [dim]{info.get('base_url', '')}[/]")
+    else:
+        err.print("Backend: [bold]local[/] [dim](on-device MLX)[/]")
     err.print(f"Model: [dim]{info.get('model')}[/]")
     if info.get("error"):
         err.print(f"[red]{info['error']}[/]")
@@ -264,6 +273,8 @@ def _cmd_config() -> int:
     conf = cfg.load()
     err.print(f"Config file: [dim]{CONFIG_PATH}[/]")
     for k, v in conf.items():
+        if k == "api_key" and v:
+            v = "•" * 8 + " [dim](set)[/]"   # don't print the secret in the clear
         err.print(f"  [cyan]{k}[/] = {v}")
     return 0
 
@@ -271,6 +282,12 @@ def _cmd_config() -> int:
 def _cmd_download() -> int:
     """Download + load the model in the foreground (shows HF progress)."""
     conf = cfg.load()
+    if conf.get("base_url"):
+        err.print(
+            "[yellow]A remote base URL is set, so there's nothing to download.[/]\n"
+            "[dim]Clear it with [bold]t --base-url none[/] to use a local MLX model.[/]"
+        )
+        return 0
     err.print(f"Downloading / loading model [bold]{conf['model']}[/] … [dim](one-time ~1GB)[/]")
     try:
         from mlx_lm import load
@@ -283,6 +300,57 @@ def _cmd_download() -> int:
     return 0
 
 
+DEFAULT_SERVE_HOST = "127.0.0.1"
+DEFAULT_SERVE_PORT = 52817   # deliberately obscure; nothing common squats here
+
+
+def _cmd_serve(rest: list[str]) -> int:
+    """Start an OpenAI-compatible HTTP endpoint in front of the daemon.
+
+    Usage: t --serve [PORT | HOST:PORT]
+    """
+    host, port = DEFAULT_SERVE_HOST, DEFAULT_SERVE_PORT
+    if rest:
+        spec = rest[0]
+        if ":" in spec:
+            h, _, p = spec.rpartition(":")
+            host = h or host
+        else:
+            p = spec
+        try:
+            port = int(p)
+        except ValueError:
+            err.print(f"[red]Invalid port:[/] {p}")
+            return 1
+
+    from . import serve as serve_mod
+
+    err.print("Starting OpenAI-compatible endpoint… [dim](reuses the daemon — one copy of the model)[/]")
+    try:
+        with err.status("[dim]loading model…[/]", spinner="dots") as st:
+            client.ensure_ready(on_status=lambda s: st.update(f"[dim]loading model ({s})…[/]"))
+    except client.DaemonError as e:
+        err.print(f"[red]{e}[/]")
+        err.print(f"[dim]See log: {LOG_PATH}[/]")
+        return 1
+
+    def announce(h: str, p: int) -> None:
+        base = f"http://{h}:{p}/v1"
+        err.print("[green]Ready.[/]  [bold]No API key[/] — localhost only.")
+        err.print(f"  Base URL:   [bold cyan]{base}[/]")
+        err.print(f"  Chat:       [dim]{base}/chat/completions[/]")
+        err.print(f"  Model id:   [dim]{cfg.load()['model']}[/]")
+        err.print("[dim]Ctrl+C to stop.[/]")
+
+    try:
+        serve_mod.serve(host, port, on_ready=announce)
+    except OSError as e:
+        err.print(f"[red]Could not bind {host}:{port}:[/] {e}")
+        return 1
+    err.print("\n[dim]Endpoint stopped.[/]")
+    return 0
+
+
 def _cmd_model(arg: str | None) -> int:
     if not arg:
         err.print(f"Model: [bold]{cfg.load()['model']}[/]")
@@ -292,28 +360,87 @@ def _cmd_model(arg: str | None) -> int:
     return 0
 
 
+def _cmd_base_url(arg: str | None) -> int:
+    if arg is None:
+        url = cfg.load().get("base_url") or ""
+        if url:
+            err.print(f"Base URL: [bold]{url}[/]  [dim](remote backend)[/]")
+        else:
+            err.print("Base URL: [dim]not set — using the local MLX model[/]")
+        return 0
+    if arg.strip().lower() in ("", "none", "off", "local"):
+        cfg.set_value("base_url", "")
+        err.print("Cleared base URL — using the [bold]local MLX[/] model.  Run [bold]t --restart[/].")
+        return 0
+    cfg.set_value("base_url", arg.strip())
+    err.print(
+        f"Base URL set to [bold]{arg.strip()}[/]  [dim](remote OpenAI-compatible API)[/].\n"
+        "Set the model with [bold]t --model <id>[/], a key with [bold]t --api-key <key>[/] if needed, "
+        "then [bold]t --restart[/]."
+    )
+    return 0
+
+
+def _cmd_api_key(arg: str | None) -> int:
+    if arg is None:
+        err.print("API key: [bold]set[/]" if cfg.load().get("api_key") else "API key: [dim]not set[/]")
+        return 0
+    if arg.strip().lower() in ("", "none", "off"):
+        cfg.set_value("api_key", "")
+        err.print("Cleared API key.")
+        return 0
+    cfg.set_value("api_key", arg)
+    err.print("API key saved.  Run [bold]t --restart[/] if the daemon is running.")
+    return 0
+
+
 def _translate(target, content: str) -> int:
     conf = cfg.load()
     prompt = build_prompt(target, content)
     max_tokens = int(conf["max_tokens"])
 
-    try:
-        with err.status("[dim]starting translator…[/]", spinner="dots") as st:
-            client.ensure_ready(
-                on_status=lambda s: st.update(f"[dim]loading model ({s})…[/]")
-            )
-    except client.DaemonError as e:
-        err.print(f"[red]Translator error:[/] {e}")
-        err.print(f"[dim]See log: {LOG_PATH}[/]")
-        return 1
-
-    err.print(f"[dim]→ {target.en_name}[/]")
     from .render import Stream
+
+    def run_translation(stream: Stream) -> None:
+        client.ensure_ready(
+            on_status=lambda s: stream.note(f"loading model ({s})...")
+        )
+        stream.note("translating...", ttl=0.8)
+        client.translate_stream(
+            prompt,
+            max_tokens,
+            stream.feed,
+            cancel_event=stream.cancel_event,
+        )
+
     try:
-        with Stream(out) as stream:
-            client.translate_stream(prompt, max_tokens, stream.feed)
+        with Stream(out, target_label=target.en_name) as stream:
+            if not stream.tty:
+                try:
+                    with err.status("[dim]starting translator…[/]", spinner="dots") as st:
+                        client.ensure_ready(
+                            on_status=lambda s: st.update(f"[dim]loading model ({s})…[/]")
+                        )
+                except client.DaemonError as e:
+                    err.print(f"[red]Translator error:[/] {e}")
+                    err.print(f"[dim]See log: {LOG_PATH}[/]")
+                    return 1
+                err.print(f"[dim]→ {target.en_name}[/]")
+                stream.run(
+                    lambda: client.translate_stream(
+                        prompt,
+                        max_tokens,
+                        stream.feed,
+                        cancel_event=stream.cancel_event,
+                    )
+                )
+            else:
+                stream.run(lambda: run_translation(stream))
+            if stream.cancelled:
+                return 130
     except client.DaemonError as e:
         err.print(f"[red]Translation failed:[/] {e}")
+        err.print(f"[dim]See log: {LOG_PATH}[/]")
         return 1
     return 0
 
@@ -344,8 +471,14 @@ def main() -> None:
             sys.exit(_cmd_config())
         if a0 in ("--model", "model"):
             sys.exit(_cmd_model(args[1] if len(args) > 1 else None))
+        if a0 in ("--base-url", "base-url"):
+            sys.exit(_cmd_base_url(args[1] if len(args) > 1 else None))
+        if a0 in ("--api-key", "api-key"):
+            sys.exit(_cmd_api_key(args[1] if len(args) > 1 else None))
         if a0 in ("--download", "download"):
             sys.exit(_cmd_download())
+        if a0 in ("--serve", "serve"):
+            sys.exit(_cmd_serve(args[1:]))
 
     # `--` ends flag parsing: everything after it is literal text to translate,
     # so text that starts with a dash still works (e.g. t -- --pb, t zh -- --x).

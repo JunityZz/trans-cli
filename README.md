@@ -22,7 +22,7 @@ English · [简体中文](README.zh-CN.md)
 - **`t <text>`** — translate straight from your terminal into your default language.
 - **`t <lang> <text>`** — pick a target language on the fly (`t ja hello`, `t 中文 hello`, `t 普通话 hello`).
 - **33 languages**, addressed by ISO code *or* their English/Chinese names — and the model understands plenty of names you don't even configure.
-- **Streaming output that doesn't scroll.** Tokens render in place so your eyes never chase a moving line.
+- **Fullscreen streaming output.** Translation opens in an isolated terminal screen so partial redraws never pollute shell scrollback.
 - **Warm daemon.** The model loads once and stays resident, so everyday translations feel instant.
 - **100% local & private.** Runs entirely on-device via MLX. Works offline.
 - **Clipboard-friendly.** `t --pb` translates whatever you've copied; `t hello | pbcopy` copies the result back.
@@ -74,6 +74,22 @@ echo "Bonjour le monde" | t zh
 t es hello world | pbcopy
 ```
 
+### Translation View Shortcuts
+
+When stdout is a terminal, `t` opens a vim-like fullscreen translation view. After translation finishes, press **q** or **Esc** to return to the shell; the final translation is printed once in the normal terminal.
+
+```text
+q / Esc       exit; exiting during generation cancels the translation
+p / Space     pause or resume streaming
+c / y         copy the current translation to the clipboard
++ / - / 0     adjust display zoom / reset
+up/down or j/k scroll long translations
+```
+
+Terminal programs cannot reliably control the terminal emulator's real font size. `+` / `-` change the translation view's display zoom and wrapping; use your terminal's own shortcut, usually Cmd+Plus / Cmd+Minus, for the actual font size.
+
+Use `T_NO_TUI=1 t ...` to temporarily disable the fullscreen view. When stdout is piped or redirected, `t` automatically skips the fullscreen view and emits plain translated text only.
+
 ### Paste mode (multi-line) — just run `t`
 
 Run `t` with no text to open **paste mode**: the screen clears and you can paste
@@ -106,6 +122,24 @@ t --restart          # reload it
 t --config           # show config file + values
 t --model <id>       # use a different MLX model
 ```
+
+### Use a remote model (OpenAI-compatible API)
+
+Point `t` at any OpenAI-compatible endpoint (OpenAI, a local Ollama/vLLM/LM Studio
+server, etc.) instead of the on-device MLX model. When a base URL is set, the
+daemon forwards every translation to that endpoint and loads no local weights.
+
+```bash
+t --base-url https://api.openai.com/v1   # remote OpenAI-compatible endpoint
+t --model gpt-4o-mini                    # the remote model id
+t --api-key sk-...                       # bearer token, if the endpoint needs one
+t --restart                              # apply it
+
+t --base-url none                        # switch back to the local MLX model
+```
+
+`t --status` shows which backend is active. The base URL is the OpenAI-style root
+(`.../v1`); `t` appends `/chat/completions` for you.
 
 ## 🌍 Supported languages
 

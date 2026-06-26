@@ -78,25 +78,39 @@ def ensure_ready(on_status=None, timeout: float = 900.0) -> dict:
     raise DaemonError("timed out waiting for the translator to start")
 
 
-def translate_stream(prompt: str, max_tokens: int, on_chunk) -> None:
+def translate_stream(prompt: str, max_tokens: int, on_chunk, cancel_event=None) -> None:
     """Send a translation request and feed each streamed chunk to on_chunk."""
     s = _connect(timeout=None)  # generation can take a while; no read timeout
     try:
-        f = s.makefile("rwb")
         req = {"cmd": "translate", "prompt": prompt, "max_tokens": max_tokens}
-        f.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
-        f.flush()
+        s.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+
+        if cancel_event is not None:
+            s.settimeout(0.2)
+
+        buf = b""
         while True:
-            line = f.readline()
-            if not line:
+            if cancel_event is not None and cancel_event.is_set():
                 break
-            msg = json.loads(line.decode("utf-8"))
-            if "t" in msg:
-                on_chunk(msg["t"])
-            elif msg.get("done"):
+            try:
+                data = s.recv(4096)
+            except socket.timeout:
+                continue
+            if not data:
                 break
-            elif "error" in msg:
-                raise DaemonError(msg["error"])
+            buf += data
+
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if not line:
+                    continue
+                msg = json.loads(line.decode("utf-8"))
+                if "t" in msg:
+                    on_chunk(msg["t"])
+                elif msg.get("done"):
+                    return
+                elif "error" in msg:
+                    raise DaemonError(msg["error"])
     finally:
         s.close()
 

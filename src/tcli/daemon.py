@@ -55,6 +55,7 @@ def _send_json(conn: socket.socket, obj) -> None:
 class Daemon:
     def __init__(self) -> None:
         self.conf = cfg.load()
+        self.remote = bool(self.conf.get("base_url"))
         self.model = None
         self.tokenizer = None
         self.sampler = None
@@ -72,6 +73,12 @@ class Daemon:
             self._serve_translate(conn, req)
 
     def _load_model(self) -> None:
+        if self.remote:
+            # Remote backend: nothing to load locally — the model lives behind
+            # the configured base URL. Mark ready immediately.
+            self.status = "ready"
+            _log(f"remote backend ready: {self.conf['base_url']} (model {self.conf['model']})")
+            return
         try:
             from mlx_lm import load
             from mlx_lm.sample_utils import make_logits_processors, make_sampler
@@ -99,24 +106,41 @@ class Daemon:
             if self.status != "ready":
                 _send_json(conn, {"error": self.error or f"model is {self.status}"})
                 return
-            from mlx_lm import stream_generate
 
             self.last_active = time.time()
-            messages = [{"role": "user", "content": req["prompt"]}]
-            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
             max_tokens = int(req.get("max_tokens", self.conf["max_tokens"]))
-            for resp in stream_generate(
-                self.model,
-                self.tokenizer,
-                prompt,
-                max_tokens=max_tokens,
-                sampler=self.sampler,
-                logits_processors=self.logits_processors,
-            ):
-                if resp.text:
-                    _send_json(conn, {"t": resp.text})
+
+            if self.remote:
+                from .remote import RemoteError, stream_chat
+
+                try:
+                    stream_chat(
+                        self.conf, req["prompt"], max_tokens,
+                        lambda t: _send_json(conn, {"t": t}),
+                    )
+                except RemoteError as e:
+                    _send_json(conn, {"error": str(e)})
+                    return
+            else:
+                from mlx_lm import stream_generate
+
+                messages = [{"role": "user", "content": req["prompt"]}]
+                prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+                for resp in stream_generate(
+                    self.model,
+                    self.tokenizer,
+                    prompt,
+                    max_tokens=max_tokens,
+                    sampler=self.sampler,
+                    logits_processors=self.logits_processors,
+                ):
+                    if resp.text:
+                        _send_json(conn, {"t": resp.text})
+
             _send_json(conn, {"done": True})
             self.last_active = time.time()
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            _log(f"client disconnected during generation ({type(e).__name__})")
         except Exception as e:  # noqa: BLE001
             _log("generate failed:\n" + traceback.format_exc())
             try:
@@ -148,6 +172,8 @@ class Daemon:
                 "ready": self.status == "ready",
                 "error": self.error,
                 "model": self.conf["model"],
+                "backend": "remote" if self.remote else "local",
+                "base_url": self.conf.get("base_url") or "",
                 "pid": os.getpid(),
             })
             conn.close()
@@ -190,7 +216,7 @@ class Daemon:
         _log(f"daemon listening pid={os.getpid()}")
 
         threading.Thread(target=self._worker, daemon=True).start()
-        idle = int(self.conf.get("idle_timeout", 1800))
+        idle = int(self.conf.get("idle_timeout", 0))
 
         try:
             while True:

@@ -7,8 +7,10 @@ from .paths import CONFIG_PATH, DEFAULT_MODEL, ensure_base
 DEFAULTS = {
     "default_lang": "en",          # target language when none is given
     "model": DEFAULT_MODEL,
-    "max_tokens": 2048,
-    "idle_timeout": 1800,          # seconds; daemon exits after this idle. 0 = never
+    "base_url": "",                # OpenAI-compatible API root; empty = local MLX
+    "api_key": "",                 # bearer token for the remote endpoint, if any
+    "max_tokens": 16384,           # generous cap; you can interrupt streaming anytime (q/esc)
+    "idle_timeout": 0,             # seconds the daemon stays warm when idle; 0 = never offload
     # Hy-MT2-1.8B recommended sampling params:
     "temp": 0.7,
     "top_p": 0.6,
